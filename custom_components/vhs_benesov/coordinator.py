@@ -2,6 +2,7 @@ import re
 import logging
 from datetime import timedelta
 from typing import Any
+from urllib.parse import urljoin
 
 import aiohttp
 from bs4 import BeautifulSoup
@@ -65,10 +66,21 @@ class VHSBenesovCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "ctl00$PHZonePrincipale$HiddenMessageConnexion": "Connection in progress",
         }
 
-        async with session.post(login_url, data=post_data, allow_redirects=True) as resp:
-            if "Login.aspx" in str(resp.url):
+        # Don't auto-follow the POST redirect — check Location first to confirm credentials
+        # were accepted, then follow manually so every hop's Set-Cookie is captured.
+        async with session.post(login_url, data=post_data, allow_redirects=False) as resp:
+            location = resp.headers.get("Location", "")
+            if resp.status not in (301, 302, 303, 307, 308) or "Login.aspx" in location:
                 raise UpdateFailed("Login failed — check VHS Benešov credentials")
-            _LOGGER.debug("Logged in, redirected to %s", resp.url)
+
+        # Follow the redirect chain now so SE_Pilote_Cookie (set by default.aspx or
+        # Accueil.aspx, not the POST response itself) lands in the cookie jar.
+        # Use urljoin so an absolute-path Location like /eMIS.SE_VHS-Benesov/default.aspx
+        # resolves correctly against the host — not doubled against BASE_URL.
+        redirect_url = urljoin(login_url, location)
+        async with session.get(redirect_url, allow_redirects=True) as resp:
+            final_url = str(resp.url)
+            _LOGGER.debug("Login complete, final=%s cookies=%s", final_url, [c.key for c in session.cookie_jar])
 
     async def _get(self, path: str) -> str | None:
         """Fetch a page; return None if redirected to login (session expired)."""
