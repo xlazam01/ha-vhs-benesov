@@ -15,7 +15,7 @@ from .const import DOMAIN, BASE_URL
 
 async def _test_credentials(username: str, password: str) -> None:
     """Raise ValueError if credentials are rejected."""
-    async with aiohttp.ClientSession(cookie_jar=aiohttp.CookieJar()) as session:
+    async with aiohttp.ClientSession(cookie_jar=aiohttp.CookieJar(unsafe=True)) as session:
         async with session.get(f"{BASE_URL}/Login.aspx") as resp:
             html = await resp.text()
 

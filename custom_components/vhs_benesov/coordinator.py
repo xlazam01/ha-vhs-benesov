@@ -38,7 +38,8 @@ class VHSBenesovCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     def _ensure_session(self) -> aiohttp.ClientSession:
         if not self._session_ok():
-            self._session = aiohttp.ClientSession(cookie_jar=aiohttp.CookieJar())
+            # unsafe=True: accept cookies that lack a Domain attribute (common in ASP.NET)
+            self._session = aiohttp.ClientSession(cookie_jar=aiohttp.CookieJar(unsafe=True))
         return self._session
 
     async def close(self) -> None:
