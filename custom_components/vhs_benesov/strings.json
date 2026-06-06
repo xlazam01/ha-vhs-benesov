@@ -1,0 +1,21 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "VHS Benešov Water Meter",
+        "description": "Enter your VHS Benešov portal credentials (customer number + password).",
+        "data": {
+          "username": "Customer number",
+          "password": "Password"
+        }
+      }
+    },
+    "error": {
+      "invalid_auth": "Invalid customer number or password.",
+      "cannot_connect": "Unable to reach the VHS Benešov portal."
+    },
+    "abort": {
+      "already_configured": "This account is already configured."
+    }
+  }
+}
