@@ -21,6 +21,7 @@ async def async_setup_entry(
     coordinator: VHSBenesovCoordinator = hass.data[DOMAIN][entry.entry_id]
     async_add_entities([
         VHSMeterIndexSensor(coordinator, entry),
+        VHSLastReadingSensor(coordinator, entry),
         VHSCurrentMonthSensor(coordinator, entry),
         VHSMonthlyHistorySensor(coordinator, entry),
     ])
@@ -42,7 +43,6 @@ class VHSMeterIndexSensor(_VHSBase):
     """Absolute meter reading — use this for the Energy dashboard (water)."""
 
     _attr_name = "Water Meter Index"
-    _attr_unique_id_suffix = "meter_index"
     _attr_device_class = SensorDeviceClass.WATER
     _attr_state_class = SensorStateClass.TOTAL_INCREASING
     _attr_native_unit_of_measurement = UnitOfVolume.CUBIC_METERS
@@ -57,9 +57,29 @@ class VHSMeterIndexSensor(_VHSBase):
     def native_value(self) -> float | None:
         return self.coordinator.data.get("meter_index")
 
+
+class VHSLastReadingSensor(_VHSBase):
+    """Timestamp of the last meter reading as reported by the portal."""
+
+    _attr_name = "Water Meter Last Reading"
+    _attr_device_class = SensorDeviceClass.TIMESTAMP
+    _attr_icon = "mdi:clock-outline"
+
     @property
-    def extra_state_attributes(self) -> dict:
-        return {"last_reading_date": self.coordinator.data.get("last_reading_date")}
+    def unique_id(self) -> str:
+        return f"{self._entry.entry_id}_last_reading"
+
+    @property
+    def native_value(self):
+        raw = self.coordinator.data.get("last_reading_date")
+        if not raw:
+            return None
+        # Already parsed to ISO 8601 by the coordinator; HA accepts datetime strings.
+        from datetime import datetime, timezone
+        try:
+            return datetime.fromisoformat(raw)
+        except ValueError:
+            return None
 
 
 class VHSCurrentMonthSensor(_VHSBase):

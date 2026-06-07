@@ -25,6 +25,7 @@ Custom Home Assistant integration for customers of **VHS Benešov a.s.** (Vodoho
 | Entity | Device class | State class | Unit | Notes |
 |---|---|---|---|---|
 | `sensor.water_meter_index` | `water` | `total_increasing` | m³ | Use this in the Energy dashboard |
+| `sensor.water_meter_last_reading` | `timestamp` | — | — | When the meter last reported to the portal |
 | `sensor.water_consumption_this_month` | `water` | `total` | m³ | Current month; attribute `month` shows label |
 | `sensor.water_monthly_history` | `water` | `measurement` | m³ | Disabled by default; full history in attributes |
 

@@ -1,6 +1,6 @@
 import re
 import logging
-from datetime import timedelta
+from datetime import timedelta, datetime, timezone
 from http.cookies import SimpleCookie
 from typing import Any
 from urllib.parse import urljoin
@@ -145,7 +145,13 @@ class VHSBenesovCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         m = re.search(r"Index Base of <span[^>]*>([^<]+)</span>", site_html)
         if m:
-            data["last_reading_date"] = m.group(1).strip()
+            raw = m.group(1).strip()
+            try:
+                # Portal returns US English format: "6/6/2026 3:55 PM"
+                dt = datetime.strptime(raw, "%m/%d/%Y %I:%M %p").replace(tzinfo=timezone.utc)
+                data["last_reading_date"] = dt.isoformat()
+            except ValueError:
+                data["last_reading_date"] = raw
 
         conso_html = await self._fetch_with_reauth("Site_Energie.aspx?Affichage=ConsoMois")
         soup = BeautifulSoup(conso_html, "html.parser")
