@@ -1,11 +1,13 @@
 import re
 import logging
 from datetime import timedelta
+from http.cookies import SimpleCookie
 from typing import Any
 from urllib.parse import urljoin
 
 import aiohttp
 from bs4 import BeautifulSoup
+from yarl import URL
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_USERNAME, CONF_PASSWORD
@@ -16,10 +18,27 @@ from .const import DOMAIN, BASE_URL, UPDATE_INTERVAL_HOURS
 
 _LOGGER = logging.getLogger(__name__)
 
+_HOST_URL = URL(BASE_URL).origin()
+
 
 def _extract_hidden(soup: BeautifulSoup, name: str) -> str:
     el = soup.find("input", {"name": name})
     return el["value"] if el else ""
+
+
+def _inject_cookie(jar: aiohttp.CookieJar, name: str, value: str) -> None:
+    """Manually insert a cookie into the aiohttp jar, bypassing SimpleCookie parsing.
+
+    The portal sends two Set-Cookie headers for SE_Pilote_Cookie: first an empty
+    expired one (to clear it), then the real value. aiohttp's SimpleCookie merges
+    them and inherits the 1999 expiry onto the real value, causing it to be dropped.
+    Direct injection avoids that merge entirely.
+    """
+    cookie: SimpleCookie = SimpleCookie()
+    cookie[name] = value
+    cookie[name]["path"] = "/"
+    cookie[name]["domain"] = _HOST_URL.host
+    jar.update_cookies(cookie, _HOST_URL)
 
 
 class VHSBenesovCoordinator(DataUpdateCoordinator[dict[str, Any]]):
@@ -39,7 +58,6 @@ class VHSBenesovCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     def _ensure_session(self) -> aiohttp.ClientSession:
         if not self._session_ok():
-            # unsafe=True: accept cookies that lack a Domain attribute (common in ASP.NET)
             self._session = aiohttp.ClientSession(cookie_jar=aiohttp.CookieJar(unsafe=True))
         return self._session
 
@@ -66,21 +84,27 @@ class VHSBenesovCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "ctl00$PHZonePrincipale$HiddenMessageConnexion": "Connection in progress",
         }
 
-        # Don't auto-follow the POST redirect — check Location first to confirm credentials
-        # were accepted, then follow manually so every hop's Set-Cookie is captured.
         async with session.post(login_url, data=post_data, allow_redirects=False) as resp:
             location = resp.headers.get("Location", "")
             if resp.status not in (301, 302, 303, 307, 308) or "Login.aspx" in location:
                 raise UpdateFailed("Login failed — check VHS Benešov credentials")
 
-        # Follow the redirect chain now so SE_Pilote_Cookie (set by default.aspx or
-        # Accueil.aspx, not the POST response itself) lands in the cookie jar.
-        # Use urljoin so an absolute-path Location like /eMIS.SE_VHS-Benesov/default.aspx
-        # resolves correctly against the host — not doubled against BASE_URL.
-        redirect_url = urljoin(login_url, location)
-        async with session.get(redirect_url, allow_redirects=True) as resp:
-            final_url = str(resp.url)
-            _LOGGER.debug("Login complete, final=%s cookies=%s", final_url, [c.key for c in session.cookie_jar])
+            # The server sends SE_Pilote_Cookie as two Set-Cookie headers: first an
+            # empty expired one (delete), then the real value. aiohttp's SimpleCookie
+            # merge inherits the 1999 expiry onto the real value and drops it.
+            # Parse raw headers and inject the last non-empty value directly.
+            auth_value = None
+            for raw in resp.headers.getall("Set-Cookie", []):
+                if raw.startswith("SE_Pilote_Cookie="):
+                    v = raw.split("=", 1)[1].split(";")[0].strip()
+                    if v:
+                        auth_value = v
+
+        if auth_value:
+            _inject_cookie(session.cookie_jar, "SE_Pilote_Cookie", auth_value)
+            _LOGGER.debug("Injected SE_Pilote_Cookie (%d chars)", len(auth_value))
+        else:
+            _LOGGER.warning("SE_Pilote_Cookie not found in POST response — may fail")
 
     async def _get(self, path: str) -> str | None:
         """Fetch a page; return None if redirected to login (session expired)."""
@@ -111,7 +135,6 @@ class VHSBenesovCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     async def _fetch_data(self) -> dict[str, Any]:
         data: dict[str, Any] = {}
 
-        # --- Current meter index from Site.aspx ---
         site_html = await self._fetch_with_reauth("Site.aspx")
 
         m = re.search(r"val > ([\d.]+)\)", site_html)
@@ -124,17 +147,11 @@ class VHSBenesovCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if m:
             data["last_reading_date"] = m.group(1).strip()
 
-        # --- Monthly consumption from ConsoMois ---
-        conso_html = await self._fetch_with_reauth(
-            "Site_Energie.aspx?Affichage=ConsoMois"
-        )
+        conso_html = await self._fetch_with_reauth("Site_Energie.aspx?Affichage=ConsoMois")
         soup = BeautifulSoup(conso_html, "html.parser")
 
         labels = [td.get_text(strip=True) for td in soup.find_all("td", class_="TableauEnergieLabel")]
-        values = [
-            span.get_text(strip=True)
-            for span in soup.find_all("span", class_="CouleurConsommationEau")
-        ]
+        values = [span.get_text(strip=True) for span in soup.find_all("span", class_="CouleurConsommationEau")]
 
         monthly: dict[str, float] = {}
         for label, value in zip(labels, values):
@@ -144,7 +161,6 @@ class VHSBenesovCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 pass
 
         data["monthly_consumption"] = monthly
-
         if monthly:
             last_month = list(monthly.keys())[-1]
             data["current_month_label"] = last_month
