@@ -5,38 +5,36 @@
 [![HA version](https://img.shields.io/badge/Home%20Assistant-2023.4%2B-blue)](https://www.home-assistant.io/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-Custom Home Assistant integration for customers of **VHS Benešov a.s.** (Vodohospodářská společnost Benešov), powered by the [SUEZ Pracdis](https://cz-sitr.suezsmartsolutions.com) smart water portal.
-
-Scrapes the customer portal and exposes your water meter data as native Home Assistant sensors — compatible with the **Energy dashboard** water tracking.
+Custom Home Assistant integration for customers of **VHS Benešov a.s.** (Vodohospodářská společnost Benešov). Scrapes the [SUEZ Pracdis](https://cz-sitr.suezsmartsolutions.com/eMIS.SE_VHS-Benesov/) customer portal and exposes your water meter data as native HA sensors — fully compatible with the **Energy dashboard**.
 
 ---
 
 ## Features
 
-- Current absolute meter index (m³) — works with the HA Energy dashboard
-- Current month consumption (m³)
-- Full month-by-month history as sensor attributes (24 months)
-- Automatic session management with re-login on expiry
-- Config Flow UI setup — no YAML editing required
-- Polling every hour (configurable in code)
+- **Current meter index** (m³) — absolute odometer reading, updates daily
+- **Monthly consumption** (m³) — usage for the current reported month
+- **24-month consumption history** — stored as sensor attributes
+- Automatic session management with silent re-login on expiry
+- Config Flow UI — no YAML editing required
+- Password stored as masked field, excluded from diagnostics
 
 ---
 
-## Sensors created
+## Sensors
 
-| Entity | Device class | State class | Description |
-|---|---|---|---|
-| `sensor.water_meter_index` | `water` | `total_increasing` | Absolute meter reading in m³. Use this in the Energy dashboard. |
-| `sensor.water_consumption_this_month` | `water` | `total` | Consumption in the current (latest reported) month. |
-| `sensor.water_monthly_history` | `water` | `measurement` | Disabled by default. State = last month; attributes contain the full monthly history dict. |
+| Entity | Device class | State class | Unit | Notes |
+|---|---|---|---|---|
+| `sensor.water_meter_index` | `water` | `total_increasing` | m³ | Use this in the Energy dashboard |
+| `sensor.water_consumption_this_month` | `water` | `total` | m³ | Current month; attribute `month` shows label |
+| `sensor.water_monthly_history` | `water` | `measurement` | m³ | Disabled by default; full history in attributes |
 
 ---
 
 ## Requirements
 
-- Home Assistant 2023.4 or newer
-- A customer account on the [VHS Benešov portal](https://cz-sitr.suezsmartsolutions.com/eMIS.SE_VHS-Benesov/Login.aspx)
-- Python package `beautifulsoup4` (installed automatically by HA)
+- Home Assistant **2023.4** or newer
+- An account on the [VHS Benešov customer portal](https://cz-sitr.suezsmartsolutions.com/eMIS.SE_VHS-Benesov/Login.aspx) — your customer number and password
+- Python package `beautifulsoup4` (installed automatically by HA on first load)
 
 ---
 
@@ -44,58 +42,93 @@ Scrapes the customer portal and exposes your water meter data as native Home Ass
 
 ### Via HACS (recommended)
 
-1. Open HACS in Home Assistant.
-2. Click **Custom repositories** → add this repo URL with category **Integration**.
-3. Search for **VHS Benešov** and install.
-4. Restart Home Assistant.
+1. Open **HACS** in Home Assistant.
+2. Click the three-dot menu → **Custom repositories**.
+3. Add `https://github.com/xlazam01/ha-vhs-benesov` with category **Integration**.
+4. Click **Download** on the VHS Benešov card.
+5. **Restart Home Assistant.**
 
 ### Manual
 
-1. Copy the `custom_components/vhs_benesov` folder into your HA config directory:
+1. Download the latest release or clone this repo.
+2. Copy the `custom_components/vhs_benesov/` folder into your HA config directory so the path is:
    ```
    /config/custom_components/vhs_benesov/
    ```
-2. Restart Home Assistant.
+3. **Restart Home Assistant.**
 
 ---
 
-## Configuration
+## How to set up
 
-1. Go to **Settings → Devices & Services → Add Integration**.
-2. Search for **VHS Benešov**.
-3. Enter your portal credentials:
-   - **Customer number** — the number you use to log in (e.g. `6512000XXX`)
-   - **Password** — your portal password
-4. Click **Submit**. The integration validates the credentials live and creates the sensors.
+### Step 1 — Add the integration
 
-Credentials are stored in HA's internal config entry storage and the password field is masked throughout the UI.
+Go to **Settings → Devices & Services → Add Integration** and search for **VHS Benešov**.
+
+![Add Integration search](docs/step1_search.png)
+
+### Step 2 — Enter your credentials
+
+| Field | What to enter |
+|---|---|
+| **Customer number** | Your login name for the portal (e.g. `6512000393`) |
+| **Password** | Your portal password |
+
+The integration validates the credentials live before saving. The password is masked and never shown in plain text.
+
+![Credentials form](docs/step2_credentials.png)
+
+### Step 3 — Done
+
+Three sensors are created under a single **VHS Benešov Water Meter** device. The first data fetch runs immediately on setup; subsequent updates run every hour.
 
 ---
 
-## Energy dashboard
+## Using with the Energy dashboard
 
-Add the **Water Meter Index** sensor (`sensor.water_meter_index`) to the Energy dashboard under **Water** → **Water consumption from a water metre**. Because its state class is `total_increasing`, HA will automatically calculate daily/weekly/monthly consumption statistics.
+1. Go to **Settings → Dashboards → Energy**.
+2. Under **Water**, click **Add water source**.
+3. Select **Water Meter Index** (`sensor.water_meter_index`).
+4. Save.
+
+Because the sensor uses `state_class: total_increasing`, HA automatically calculates daily, weekly, and monthly consumption statistics from the absolute readings.
 
 ---
 
-## Data refresh
+## Update interval
 
-The portal is polled every **1 hour**. The portal itself updates readings approximately once per day (overnight), so hourly polling is conservative and avoids unnecessary load.
+The portal is polled every **1 hour**. The portal itself receives new readings approximately once per day (overnight), so the displayed value changes once daily even though polling is hourly.
 
 ---
 
 ## Troubleshooting
 
-**Sensors show `unavailable` after setup**
-- Check HA logs for `vhs_benesov` errors.
-- The portal may be temporarily down — the integration will retry on the next poll cycle.
+### "Invalid customer number or password"
 
-**Login keeps failing**
-- Verify your credentials by logging in manually at the [portal](https://cz-sitr.suezsmartsolutions.com/eMIS.SE_VHS-Benesov/Login.aspx).
-- The portal uses ASP.NET session tokens; if the login page structure changes after a portal update, open an issue.
+Verify that you can log in manually at the [portal](https://cz-sitr.suezsmartsolutions.com/eMIS.SE_VHS-Benesov/Login.aspx). Passwords are case-sensitive. Special characters (e.g. `$`) are supported.
 
-**Meter index looks wrong**
-- The value comes from the animated odometer on the portal home page. If the portal changes its JS structure, open an issue with the relevant HTML snippet.
+### Sensors show `unavailable` after setup
+
+- The portal may be temporarily down. The integration retries automatically on the next poll cycle.
+- Check HA logs (`Settings → System → Logs`) and filter for `vhs_benesov`.
+
+### Sensors stuck on old values
+
+The portal updates readings overnight. If values haven't changed in more than 48 hours, check that the integration is not in an error state (the device card would show a warning banner).
+
+### Portal structure changed
+
+This integration scrapes HTML. If VHS Benešov or SUEZ update the portal layout, the scraper may break. Open an [issue](https://github.com/xlazam01/ha-vhs-benesov/issues) with a description of what changed.
+
+---
+
+## Technical notes
+
+The portal runs on **SUEZ Pracdis GE** (ASP.NET WebForms). A few non-obvious behaviours that required workarounds:
+
+- The login POST response sets the auth cookie (`SE_Pilote_Cookie`) via **two** `Set-Cookie` headers: first an empty expired one (delete), then the real value. Python's `http.cookies.SimpleCookie` merges them and inherits the 1999 expiry, causing `aiohttp` to drop the cookie silently. The integration parses raw response headers and injects the cookie directly into the jar.
+- The session must be maintained between the GET (which generates `__VIEWSTATE` / `__EVENTVALIDATION`) and the POST. A fresh `aiohttp.CookieJar(unsafe=True)` is used per coordinator instance.
+- Redirect following is disabled on the POST response (`allow_redirects=False`) to prevent aiohttp from losing the auth cookie while chasing the redirect chain.
 
 ---
 
@@ -107,4 +140,4 @@ This integration is not affiliated with VHS Benešov a.s. or SUEZ. It screen-scr
 
 ## Contributing
 
-Pull requests welcome. Open an issue first for anything beyond a small bug fix.
+Pull requests welcome. Please open an issue first for anything beyond a small bug fix so we can agree on the approach.

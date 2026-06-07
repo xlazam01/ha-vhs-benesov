@@ -1,3 +1,5 @@
+import logging
+
 import voluptuous as vol
 import aiohttp
 from bs4 import BeautifulSoup
@@ -12,11 +14,15 @@ from homeassistant.helpers.selector import (
 
 from .const import DOMAIN, BASE_URL
 
+_LOGGER = logging.getLogger(__name__)
+
 
 async def _test_credentials(username: str, password: str) -> None:
-    """Raise ValueError if credentials are rejected."""
+    """Raise ValueError on bad credentials, Exception on connection error."""
+    login_url = f"{BASE_URL}/Login.aspx"
+
     async with aiohttp.ClientSession(cookie_jar=aiohttp.CookieJar(unsafe=True)) as session:
-        async with session.get(f"{BASE_URL}/Login.aspx") as resp:
+        async with session.get(login_url) as resp:
             html = await resp.text()
 
         soup = BeautifulSoup(html, "html.parser")
@@ -25,10 +31,16 @@ async def _test_credentials(username: str, password: str) -> None:
             el = soup.find("input", {"name": name})
             return el["value"] if el else ""
 
+        viewstate = val("__VIEWSTATE")
+        eventval = val("__EVENTVALIDATION")
+
+        if not viewstate or not eventval:
+            raise ConnectionError("Could not parse login form")
+
         post_data = {
-            "__VIEWSTATE": val("__VIEWSTATE"),
+            "__VIEWSTATE": viewstate,
             "__VIEWSTATEGENERATOR": val("__VIEWSTATEGENERATOR"),
-            "__EVENTVALIDATION": val("__EVENTVALIDATION"),
+            "__EVENTVALIDATION": eventval,
             "ctl00$PHZonePrincipale$TextBoxIdentifiant": username,
             "ctl00$PHZonePrincipale$TextBoxMotDePasse": password,
             "ctl00$PHZonePrincipale$ButtonConnexion": "Connection",
@@ -36,10 +48,9 @@ async def _test_credentials(username: str, password: str) -> None:
             "ctl00$PHZonePrincipale$HiddenMessageConnexion": "Connection in progress",
         }
 
-        async with session.post(
-            f"{BASE_URL}/Login.aspx", data=post_data, allow_redirects=True
-        ) as resp:
-            if "Login.aspx" in str(resp.url):
+        async with session.post(login_url, data=post_data, allow_redirects=False) as resp:
+            location = resp.headers.get("Location", "")
+            if resp.status not in (301, 302, 303, 307, 308) or "Login.aspx" in location:
                 raise ValueError("invalid_auth")
 
 
@@ -58,7 +69,8 @@ class VHSBenesovConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 )
             except ValueError:
                 errors["base"] = "invalid_auth"
-            except Exception:  # noqa: BLE001
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.exception("VHS: unexpected error during credential test: %s", err)
                 errors["base"] = "cannot_connect"
             else:
                 await self.async_set_unique_id(user_input[CONF_USERNAME])
