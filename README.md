@@ -95,9 +95,36 @@ Because the sensor uses `state_class: total_increasing`, HA automatically calcul
 
 ---
 
-## Update interval
+## Update interval and data freshness
 
-The portal is polled every **1 hour**. The portal itself receives new readings approximately once per day (overnight), so the displayed value changes once daily even though polling is hourly.
+### How often HA polls
+
+The coordinator fetches data from the portal every **1 hour**. An immediate fetch also runs on HA startup. You can force a manual refresh at any time from **Settings → Devices & Services → VHS Benešov → Reload**.
+
+### How often the portal itself updates
+
+The portal receives a new reading from the physical meter **once per day**, overnight (typically around 3–4 AM, based on the timestamp shown on the portal home page). Hourly polling therefore has no practical downside — the value in HA will simply be the same number for most of the day.
+
+| Time of day | What HA shows |
+|---|---|
+| Midnight – ~4 AM | Previous day's reading (meter hasn't reported yet) |
+| After ~4 AM | New reading — picked up on the next hourly poll |
+| Rest of the day | Stable; won't change until the next overnight report |
+
+### Does the HA value match the portal?
+
+Yes, exactly. HA scrapes the same number shown on the portal home page. The `last_reading_date` attribute on the **Water Meter Index** sensor shows the timestamp of the reading as reported by the portal — you can compare it directly.
+
+In **Developer Tools → States**, the sensor looks like this:
+
+```
+state:              586.369
+last_reading_date:  6/5/2026 3:55 AM
+```
+
+### Changing the poll interval
+
+Because the meter reports only once per day, you can safely increase the interval to reduce unnecessary requests. Edit `UPDATE_INTERVAL_HOURS` in `custom_components/vhs_benesov/const.py` and restart HA. A value of `6` or `12` works fine with no loss of data accuracy.
 
 ---
 
