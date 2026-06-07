@@ -1,5 +1,6 @@
 {
   "name": "VHS Benešov Water Meter",
   "render_readme": true,
-  "homeassistant": "2023.4.0"
+  "homeassistant": "2023.4.0",
+  "filename": "vhs_benesov.zip"
 }
