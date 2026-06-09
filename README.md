@@ -87,11 +87,15 @@ Three sensors are created under a single **VHS Benešov Water Meter** device. Th
 
 ## Historical data backfill
 
-On **first setup**, the integration automatically imports all available historical consumption data from the portal into HA long-term statistics at the finest available granularity (6-hour buckets via the CourbeMois view). This populates the Energy dashboard with history going as far back as the portal retains — no manual action required.
+On **first setup**, the integration automatically imports all available historical consumption data from the portal into HA long-term statistics at **6-hour granularity** (CourbeMois view). The portal retains approximately 3 years of history; all of it is imported in one go — no manual action required.
 
-On every subsequent poll, only data that has actually changed on the portal is imported. Typically this means a single page (the current month) is checked per hourly update, making regular updates very lightweight.
+On every subsequent poll, only months whose data has actually changed are imported. Typically this is just the current month, making regular updates very lightweight.
 
-The state of the backfill (which pages have been seen and their content hashes) is persisted inside the config entry so it survives HA restarts. After a restart the integration resumes incremental updates rather than re-importing everything.
+The state of the backfill (which months have been seen and their content hashes) is persisted inside the config entry so it survives HA restarts. After a restart the integration resumes incremental updates rather than re-importing everything.
+
+### How navigation works
+
+The portal exposes a direct URL per month: `?Affichage=CourbeMois&Annee=YYYY&Mois=M`. The integration iterates backwards month by month from today, switching each page to table view (via the `TabTableau` postback) before parsing. It stops after finding 3 consecutive months with no data, covering the full depth of portal history.
 
 ### Energy dashboard history
 
@@ -162,9 +166,9 @@ The portal updates readings overnight. If values haven't changed in more than 48
 
 The initial backfill runs during the first data fetch after setup. If the Energy dashboard shows no history:
 
-1. Check HA logs for `vhs_benesov: importing … CourbeMois 6h (initial)` — if absent, the backfill may not have run yet.
-2. The portal may not expose historical data in the CourbeMois view for your account. This depends on portal configuration by VHS Benešov.
-3. To force a re-backfill: remove and re-add the integration (this resets the `initial_backfill_done` flag).
+1. Check HA logs for `vhs_benesov: CourbeMois fetch complete — N month(s) checked` — if absent, the backfill may not have run yet or failed silently.
+2. If `N` is low (e.g. 1), the portal may only expose limited history for your account.
+3. To force a full re-backfill: remove and re-add the integration (this resets the `initial_backfill_done` flag).
 
 ### Portal structure changed
 
@@ -179,12 +183,18 @@ The portal runs on **SUEZ Pracdis GE** (ASP.NET WebForms). A few non-obvious beh
 - The login POST response sets the auth cookie (`SE_Pilote_Cookie`) via **two** `Set-Cookie` headers: first an empty expired one (delete), then the real value. Python's `http.cookies.SimpleCookie` merges them and inherits the 1999 expiry, causing `aiohttp` to drop the cookie silently. The integration parses raw response headers and injects the cookie directly into the jar.
 - The session must be maintained between the GET (which generates `__VIEWSTATE` / `__EVENTVALIDATION`) and the POST. A fresh `aiohttp.CookieJar(unsafe=True)` is used per coordinator instance.
 - Redirect following is disabled on the POST response (`allow_redirects=False`) to prevent aiohttp from losing the auth cookie while chasing the redirect chain.
-- CourbeMois pagination uses ASP.NET `__doPostBack` form submissions. The integration detects the previous-month control across three patterns: `<input type="submit">`, `<a href="javascript:__doPostBack(...)">`, and `onclick` attributes.
-- The backfill state (`initial_backfill_done`, per-page content hashes) is stored directly in the config entry data so it persists across HA restarts without needing a separate storage file.
+- CourbeMois history is fetched via direct `?Affichage=CourbeMois&Annee=YYYY&Mois=M` GET requests, stepping backwards month by month — no dependency on navigation buttons in the portal HTML. For each month, a `__doPostBack` with target `TabTableau` switches the widget from graph to table view before parsing.
+- Page hashes use `hashlib.sha256` of sorted JSON, ensuring stability across HA restarts (Python's built-in `hash()` is randomised per process via PYTHONHASHSEED).
+- Backfill state (`initial_backfill_done`, per-month SHA-256 hashes) is stored in the config entry data — persists across restarts without a separate storage file.
 
 ---
 
 ## Changelog
+
+### 1.1.1
+- Fix: replace Python `hash()` with SHA-256 so page hashes survive HA restarts
+- Fix: replace navigation-button pagination with direct `?Annee=&Mois=` URL iteration — covers full 3-year portal history (verified: 36 months, 4285 entries at 6h granularity)
+- Fix: POST `TabTableau` postback per month to switch from graph to table view before parsing
 
 ### 1.1.0
 - Full historical backfill on first integration setup — imports all available CourbeMois pages (6-hour granularity) with no page limit
