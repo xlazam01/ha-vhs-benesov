@@ -1,3 +1,5 @@
+import hashlib
+import json
 import re
 import logging
 from datetime import timedelta, datetime, timezone
@@ -84,6 +86,12 @@ def _parse_label(label: str) -> datetime | None:
     return None
 
 
+def _stable_hash(consumption: dict[str, float]) -> str:
+    """SHA-256 of sorted (label, value) pairs — stable across Python restarts."""
+    payload = json.dumps(sorted(consumption.items()), sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
 def _parse_consumption_table(html: str) -> dict[str, float]:
     """Extract {label: value} from a Site_Energie.aspx response."""
     soup = BeautifulSoup(html, "html.parser")
@@ -114,10 +122,9 @@ class VHSBenesovCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._entry = entry
         # Persisted: True after the one-time full historical backfill on first setup.
         self._initial_backfill_done: bool = bool(entry.data.get(_KEY_BACKFILL_DONE))
-        # Persisted: page_key (first label) → hash(consumption dict).
-        # Lets regular updates skip pages whose data hasn't changed.
-        self._page_hashes: dict[str, int] = dict(entry.data.get(_KEY_PAGE_HASHES, {}))
-        self._nav_logged: bool = False  # one-shot navigation structure log
+        # Persisted: "YYYY-MM" → sha256 of sorted consumption items.
+        # Lets regular updates skip months whose data hasn't changed.
+        self._page_hashes: dict[str, str] = dict(entry.data.get(_KEY_PAGE_HASHES, {}))
 
     def _persist_state(self) -> None:
         """Save backfill flag and page hashes into the config entry."""
@@ -285,146 +292,119 @@ class VHSBenesovCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     async def _fetch_courbe_changed(
         self, max_pages: int | None = _MAX_PAGES
     ) -> dict[str, float]:
-        """Fetch CourbeMois pages whose data has changed since last run.
+        """Fetch CourbeMois months whose data has changed since last run.
 
-        Navigates from current month backwards.  Stops as soon as a page's hash
-        matches the stored value — older pages are immutable once fully past.
-        On first run (_page_hashes empty) every available page is fetched.
-        max_pages=None removes the page cap (used for initial backfill).
+        Iterates backwards from the current month using direct ?Annee=&Mois= URLs
+        instead of relying on navigation buttons (which the portal doesn't expose).
+        For each month, attempts to switch to table view via the TabTableau postback
+        so the HTML contains parseable rows rather than just a graph widget.
+
+        Stops as soon as a month's hash matches the stored value — past months are
+        immutable once fully elapsed.  On first run (_page_hashes empty) every
+        available month is fetched.  max_pages=None removes the cap.
         """
         merged: dict[str, float] = {}
-        html = await self._fetch_with_reauth("Site_Energie.aspx?Affichage=CourbeMois")
-
-        if not self._nav_logged:
-            self._log_nav_structure(html)
-            self._nav_logged = True
-
-        visited_keys: set[str] = set()
+        now = datetime.now(timezone.utc)
+        year, month = now.year, now.month
+        consecutive_empty = 0
         page_num = 0
 
         while max_pages is None or page_num < max_pages:
+            page_key = f"{year}-{month:02d}"
+            path = f"Site_Energie.aspx?Affichage=CourbeMois&Annee={year}&Mois={month}"
+
+            try:
+                html = await self._fetch_with_reauth(path)
+            except Exception as err:
+                _LOGGER.debug("vhs_benesov: %s fetch failed: %s", page_key, err)
+                break
+
+            # Try switching to table view; fall back to the raw page if it fails.
+            html = await self._switch_to_table(html) or html
+
             consumption = _parse_consumption_table(html)
             if not consumption:
-                _LOGGER.debug("vhs_benesov: CourbeMois page %d empty, stopping", page_num)
-                break
-
-            page_key = next(iter(consumption))
-            if page_key in visited_keys:
-                _LOGGER.debug("vhs_benesov: loop at page %d (%r)", page_num, page_key)
-                break
-            visited_keys.add(page_key)
-
-            page_hash = hash(frozenset(consumption.items()))
-            if self._page_hashes.get(page_key) == page_hash:
+                consecutive_empty += 1
                 _LOGGER.debug(
-                    "vhs_benesov: page %d (%r) unchanged, stopping pagination",
-                    page_num, page_key,
+                    "vhs_benesov: %s empty (%d consecutive)", page_key, consecutive_empty
                 )
-                break
+                if consecutive_empty >= 3:
+                    _LOGGER.info(
+                        "vhs_benesov: %d consecutive empty months — stopping at %s",
+                        consecutive_empty, page_key,
+                    )
+                    break
+            else:
+                consecutive_empty = 0
+                page_hash = _stable_hash(consumption)
+                if self._page_hashes.get(page_key) == page_hash:
+                    _LOGGER.debug("vhs_benesov: %s unchanged, stopping", page_key)
+                    break
 
-            merged.update(consumption)
-            self._page_hashes[page_key] = page_hash
-            _LOGGER.debug(
-                "vhs_benesov: page %d (%r): %d entries, hash changed",
-                page_num, page_key, len(consumption),
-            )
+                merged.update(consumption)
+                self._page_hashes[page_key] = page_hash
+                _LOGGER.debug(
+                    "vhs_benesov: %s: %d entries, hash changed", page_key, len(consumption)
+                )
 
-            prev_html = await self._navigate_prev(html)
+            # Step back one month
+            month -= 1
+            if month == 0:
+                month = 12
+                year -= 1
             page_num += 1
-            if prev_html is None:
-                _LOGGER.info(
-                    "vhs_benesov: reached oldest available CourbeMois page after %d page(s)",
-                    page_num,
-                )
-                break
-            html = prev_html
 
+        if page_num:
+            _LOGGER.info(
+                "vhs_benesov: CourbeMois fetch complete — %d month(s) checked, "
+                "%d entries collected",
+                page_num, len(merged),
+            )
         return merged
 
-    async def _navigate_prev(self, html: str) -> str | None:
-        """POST the CourbeMois form to navigate to the previous month.
+    async def _switch_to_table(self, html: str) -> str | None:
+        """POST the TabTableau tab postback to get the table view of a CourbeMois page.
 
-        Returns the new page HTML, or None if no previous-month control was found.
+        The page defaults to graph view.  The table tab fires a __doPostBack with a
+        target containing 'TabTableau'.  Returns the new HTML or None if the postback
+        target isn't found or the request fails.
         """
         soup = BeautifulSoup(html, "html.parser")
-        form_data: dict[str, str] = {
+
+        target: str | None = None
+        for el in soup.find_all(onclick=True):
+            onclick = el.get("onclick", "")
+            if "TabTableau" in onclick:
+                m = re.search(r"__doPostBack\('([^']+)'", onclick)
+                if m:
+                    target = m.group(1).replace("\\x24", "$")
+                    break
+
+        if target is None:
+            # Also check <a href="javascript:..."> patterns
+            for a in soup.find_all("a", href=True):
+                href = a["href"]
+                if "TabTableau" in href:
+                    m = re.search(r"__doPostBack\('([^']+)'", href)
+                    if m:
+                        target = m.group(1).replace("\\x24", "$")
+                        break
+
+        if target is None:
+            return None
+
+        form_data = {
             "__VIEWSTATE":          _extract_hidden(soup, "__VIEWSTATE"),
             "__VIEWSTATEGENERATOR": _extract_hidden(soup, "__VIEWSTATEGENERATOR"),
             "__EVENTVALIDATION":    _extract_hidden(soup, "__EVENTVALIDATION"),
-            "__EVENTTARGET":        "",
+            "__EVENTTARGET":        target,
             "__EVENTARGUMENT":      "",
         }
-
-        _PREV_KEYWORDS = ("prec", "precedent", "prev", "previous", "avant", "◄", "<<", "&lt;")
-
-        # Pattern 1: regular <input type="submit"> whose name or value looks like "previous"
-        for btn in soup.find_all("input", {"type": "submit"}):
-            name  = btn.get("name",  "")
-            value = btn.get("value", "")
-            if any(kw in (name + value).lower() for kw in _PREV_KEYWORDS):
-                form_data[name] = value
-                break
-
-        # Pattern 2: <a href="javascript:__doPostBack(...)"> link
-        else:
-            for a in soup.find_all("a", href=True):
-                href = a["href"]
-                text = a.get_text()
-                if "__doPostBack" not in href:
-                    continue
-                if any(kw in (href + text).lower() for kw in _PREV_KEYWORDS):
-                    m = re.search(r"__doPostBack\('([^']+)'", href)
-                    if m:
-                        form_data["__EVENTTARGET"] = m.group(1).replace("\\x24", "$")
-                        form_data["__EVENTARGUMENT"] = ""
-                        break
-            else:
-                # Pattern 3: onclick attribute on any element
-                for el in soup.find_all(onclick=True):
-                    onclick = el.get("onclick", "")
-                    if "__doPostBack" not in onclick:
-                        continue
-                    if any(kw in (onclick + el.get_text()).lower() for kw in _PREV_KEYWORDS):
-                        m = re.search(r"__doPostBack\('([^']+)'", onclick)
-                        if m:
-                            form_data["__EVENTTARGET"] = m.group(1).replace("\\x24", "$")
-                            form_data["__EVENTARGUMENT"] = ""
-                            break
-                else:
-                    return None
-
         session = self._ensure_session()
         async with session.post(_ENERGY_URL, data=form_data, allow_redirects=True) as resp:
             if "Login.aspx" in str(resp.url):
                 return None
-            new_html = await resp.text()
-
-        if not _parse_consumption_table(new_html):
-            return None
-        return new_html
-
-    def _log_nav_structure(self, html: str) -> None:
-        """Log CourbeMois navigation elements once for diagnostic purposes."""
-        soup = BeautifulSoup(html, "html.parser")
-        submit_btns = [
-            f"name={b.get('name','')!r} value={b.get('value','')!r}"
-            for b in soup.find_all("input", {"type": "submit"})
-        ]
-        postback_links = [
-            f"text={a.get_text(strip=True)!r} href={a['href'][:80]!r}"
-            for a in soup.find_all("a", href=re.compile(r"doPostBack"))
-        ]
-        onclick_els = [
-            f"tag={el.name} text={el.get_text(strip=True)!r} onclick={el['onclick'][:80]!r}"
-            for el in soup.find_all(onclick=re.compile(r"doPostBack"))
-        ]
-        _LOGGER.info(
-            "vhs_benesov: CourbeMois nav structure — submit buttons: %s | "
-            "postback links: %s | onclick elements: %s",
-            submit_btns or "(none)",
-            postback_links or "(none)",
-            onclick_els or "(none)",
-        )
+            return await resp.text()
 
     # ------------------------------------------------------------------ #
     #  Statistics helpers                                                  #
