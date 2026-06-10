@@ -66,8 +66,6 @@ Custom Home Assistant integration for customers of **VHS Benešov a.s.** (Vodoho
 
 Go to **Settings → Devices & Services → Add Integration** and search for **VHS Benešov**.
 
-![Add Integration search](docs/step1_search.png)
-
 ### Step 2 — Enter your credentials
 
 | Field | What to enter |
@@ -76,8 +74,6 @@ Go to **Settings → Devices & Services → Add Integration** and search for **V
 | **Password** | Your portal password |
 
 The integration validates the credentials live before saving. The password is masked and never shown in plain text.
-
-![Credentials form](docs/step2_credentials.png)
 
 ### Step 3 — Done
 
@@ -190,6 +186,9 @@ The portal runs on **SUEZ Pracdis GE** (ASP.NET WebForms). A few non-obvious beh
 ---
 
 ## Changelog
+
+### 1.1.2
+- Docs: remove broken screenshot references from setup guide
 
 ### 1.1.1
 - Fix: replace Python `hash()` with SHA-256 so page hashes survive HA restarts
